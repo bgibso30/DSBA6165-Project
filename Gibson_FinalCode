@@ -1,0 +1,251 @@
+# Import necessary libraries
+import pandas as pd
+from sklearn.feature_extraction.text import CountVectorizer
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+from nltk.stem import WordNetLemmatizer
+import re
+
+# Load dataset
+data = pd.read_csv(r"C:\Users\briaa\Downloads\complete_dataset (1).csv")
+
+data.head()
+
+# Print column names
+data.columns
+
+# Extract only bias and original content for modeling 
+df = data[['bias', 'content_original']]
+df.columns
+
+# Check null count
+df.isnull().sum()
+
+## Data Preparation
+# Text lowercase function
+def lower_text(text):
+    text = text.lower()  
+    return text
+
+# Apply lower_text
+df['content_original'] = data['content_original'].apply(lower_text)
+df.head()
+
+# Remove special characters function
+def special_char(text):
+    pattern = r'[^a-zA-Z0-9\s]'
+    cleaned_text = re.sub(pattern, '', text)
+    return cleaned_text
+
+# Apply special_char
+df['content_original'] = df['content_original'].apply(special_char)
+df.head()
+
+# Define a function to check if special characters are present in a string
+def has_special_characters(column):
+    pattern = r'[^a-zA-Z0-9\s]'
+    for text in column:
+        if re.search(pattern, text):
+            return True
+    return False
+
+# Apply the function 
+has_special_characters(df['content_original'])
+
+# Create word count function
+def get_word_count(tokens):
+    return len(tokens)
+
+# Tokenization
+df['tokens'] = df['content_original'].apply(word_tokenize)
+df.head()
+
+# Apply function to  get word count for top 5 rows
+df['tokens'].head().apply(get_word_count)
+
+# Download NLTK stopwords if not already downloaded
+import nltk
+from nltk.corpus import stopwords
+
+# Function to remove stop words from text
+def remove_stop_words(tokens):
+    # Initialize stop words
+    stop_words = set(stopwords.words('english'))
+    # Remove stop words
+    filtered_tokens = [token for token in tokens if token.lower() not in stop_words]
+    return filtered_tokens
+
+# Apply the function to the 'content_original' column
+df['tokens'] = df['tokens'].apply(remove_stop_words)
+
+# Check word count
+df['tokens'].head().apply(get_word_count)
+
+# Perform lemmatization
+lemmatizer = WordNetLemmatizer()
+df['tokens'] = df['tokens'].apply(lambda x: [lemmatizer.lemmatize(word) for word in x])
+
+## BOW DNN Model 
+
+# Join the tokenized words into a single string for each document
+df['text'] = df['tokens'].apply(lambda x: ' '.join(x))  
+
+# Prepare the data for bag-of-words
+vectorizer = CountVectorizer()
+X = vectorizer.fit_transform(df['text'])  # Assuming 'tokens' column contains tokenized text
+y = df['bias']
+
+# Split the dataset into training, validation, and testing sets
+X_train_val, X_test, y_train_val, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train, X_val, y_train, y_val = train_test_split(X_train_val, y_train_val, test_size=0.1, random_state=42)
+
+# Encode target variable
+label_encoder = LabelEncoder()
+y_train_encoded = label_encoder.fit_transform(y_train)
+y_val_encoded = label_encoder.transform(y_val)
+y_test_encoded = label_encoder.transform(y_test)
+
+# Convert sparse matrices to COO format
+X_train_coo = X_train.tocoo()
+X_val_coo = X_val.tocoo()
+X_test_coo = X_test.tocoo()
+
+# Sort the indices
+sort_indices_train = np.lexsort((X_train_coo.row, X_train_coo.col))
+sort_indices_val = np.lexsort((X_val_coo.row, X_val_coo.col))
+sort_indices_test = np.lexsort((X_test_coo.row, X_test_coo.col))
+
+X_train_indices_sorted = np.column_stack((X_train_coo.row[sort_indices_train], X_train_coo.col[sort_indices_train]))
+X_val_indices_sorted = np.column_stack((X_val_coo.row[sort_indices_val], X_val_coo.col[sort_indices_val]))
+X_test_indices_sorted = np.column_stack((X_test_coo.row[sort_indices_test], X_test_coo.col[sort_indices_test]))
+
+# Convert COO format to SparseTensor
+X_train_sparse = tf.sparse.SparseTensor(
+    indices=X_train_indices_sorted,
+    values=X_train_coo.data[sort_indices_train],
+    dense_shape=X_train_coo.shape
+)
+
+X_val_sparse = tf.sparse.SparseTensor(
+    indices=X_val_indices_sorted,
+    values=X_val_coo.data[sort_indices_val],
+    dense_shape=X_val_coo.shape
+)
+
+X_test_sparse = tf.sparse.SparseTensor(
+    indices=X_test_indices_sorted,
+    values=X_test_coo.data[sort_indices_test],
+    dense_shape=X_test_coo.shape
+)
+
+# Reorder the SparseTensor objects
+X_train_reordered = tf.sparse.reorder(X_train_sparse)
+X_val_reordered = tf.sparse.reorder(X_val_sparse)
+X_test_reordered = tf.sparse.reorder(X_test_sparse)
+
+# Import necessary libraries
+from tensorflow.keras.layers import Dropout
+
+# Define the DNN model architecture with two hidden layers
+model = Sequential([
+    Dense(256, activation='relu', input_shape=(X_train_reordered.shape[1],)),
+    Dropout(0.5),  # Add dropout after the first hidden layer
+    Dense(128, activation='relu'),
+    Dropout(0.5),  # Add dropout after the second hidden layer
+    Dense(64, activation='relu'),
+    Dense(3, activation='softmax')  # Output layer with 3 neurons for 3 classes
+])
+
+# Compile the model
+model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+
+# Import necessary libraries
+from tensorflow.keras.callbacks import ModelCheckpoint
+
+# Train the model with validation data
+history = model.fit(X_train_reordered, y_train_encoded, epochs=10,batch_size=16, validation_data=(X_val_reordered, y_val_encoded), verbose=1)
+
+# Evaluate the model on the test data
+test_loss, test_accuracy = model.evaluate(X_test_reordered, y_test_encoded, verbose=2)
+
+# Print the test loss and accuracy
+print(f"Test Loss: {test_loss}, Test Accuracy: {test_accuracy}")
+
+import matplotlib.pyplot as plt
+
+def plot_learning(history):
+    tgts = ['loss', 'accuracy']
+    vtgts = ['val_loss', 'val_accuracy']
+    labels = ['Training', 'Validation']
+
+    plt.figure(figsize=(12, 5))
+
+    for i, (tgt, val_tgt) in enumerate(zip(tgts, vtgts)):
+        plt.subplot(1, 2, i+1)
+        plt.plot(history.history[tgt], label=f'{labels[0]} {tgt.capitalize()}', color='blue', linestyle='-')
+        plt.plot(history.history[val_tgt], label=f'{labels[1]} {tgt.capitalize()}', color='orange', linestyle='--')
+        plt.xlabel('Epoch', fontsize=12)
+        plt.ylabel(tgt.capitalize(), fontsize=12)
+        plt.legend(fontsize=10)
+        plt.title(f"{tgt.capitalize()} Comparison", fontsize=14)
+        plt.grid(True, linestyle='--', alpha=0.7)
+
+    plt.tight_layout()
+    plt.show()
+
+plot_learning(history)
+
+## Hyperparameter Tuning
+
+# Import necessary libraries
+from sklearn.model_selection import RandomizedSearchCV
+from sklearn.metrics import accuracy_score
+
+# Define the DNN model architecture
+def create_model(dropout_rate_1=0.5, dropout_rate_2=0.5, neurons_1=256, neurons_2=128):
+    model = Sequential([
+        Dense(neurons_1, activation='relu', input_shape=(X_train_reordered.shape[1],)),
+        Dropout(dropout_rate_1),
+        Dense(neurons_2, activation='relu'),
+        Dropout(dropout_rate_2),
+        Dense(64, activation='relu'),
+        Dense(3, activation='softmax')
+    ])
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+# Define hyperparameters to search
+param_dist = {
+    'dropout_rate_1': [0.3, 0.4, 0.5],
+    'dropout_rate_2': [0.3, 0.4, 0.5],
+    'neurons_1': [128, 256, 512],
+    'neurons_2': [64, 128, 256]
+}
+
+best_accuracy = 0
+best_params = {}
+
+# Perform random search
+for _ in range(3):  # 10 iterations for random search
+    # Randomly select hyperparameters
+    params = {param: np.random.choice(values) for param, values in param_dist.items()}
+    
+    # Create and compile the model
+    model = create_model(**params)
+    
+    # Train the model
+    history = model.fit(X_train_reordered, y_train_encoded, epochs=10, batch_size=16, verbose=0)
+    
+    # Evaluate the model
+    y_pred = np.argmax(model.predict(X_val_reordered), axis=1)
+    accuracy = accuracy_score(y_val_encoded, y_pred)
+    
+    # Update best parameters if better accuracy is achieved
+    if accuracy > best_accuracy:
+        best_accuracy = accuracy
+        best_params = params
+
+# Get the best parameters and the corresponding accuracy
+print("Best Parameters:", best_params)
+print("Best Accuracy:", best_accuracy)
